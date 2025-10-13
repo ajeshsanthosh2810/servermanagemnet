@@ -12,6 +12,9 @@ import threading
 import time
 import ping3
 import telnetlib
+from dotenv import load_dotenv
+load_dotenv()
+
 
 app = Flask(__name__)
 app.secret_key = os.environ.get('SECRET_KEY', 'your-secret-key-change-this-in-production')
@@ -23,6 +26,8 @@ app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
 USERS_FILE = os.environ.get('USERS_FILE', 'users.json')
 DOCKER_COMPOSE_FILE = os.environ.get('DOCKER_COMPOSE_FILE', 'docker-compose.yml')
 COMPOSE_BASE_DIR = os.environ.get('COMPOSE_BASE_DIR', '/home/sharon/Pictures/ServerManagement/tst')
+HOST = os.environ.get('HOST', '0.0.0.0')
+PORT = int(os.environ.get('PORT', 8082))
 
 def load_users():
     try:
@@ -38,11 +43,10 @@ def save_users(users):
 def get_system_info():
     """Get comprehensive system information"""
     try:
-        # Get local IP (works across OS)
+        # Get local IP
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.settimeout(0)
         try:
-            # Doesn't need to be reachable — just used to get the right interface
             s.connect(("8.8.8.8", 80))
             ip = s.getsockname()[0]
         except Exception:
@@ -50,19 +54,21 @@ def get_system_info():
         finally:
             s.close()
 
-        # Get MAC address
+        # MAC address
         mac = ':'.join(['{:02x}'.format((uuid.getnode() >> elements) & 0xff)
                        for elements in range(0, 2*6, 2)][::-1])
 
-        # Get serial number (Linux)
+        # Serial number
         serial = "Unknown"
         try:
-            with open('/sys/class/dmi/id/product_serial', 'r') as f:
-                serial = f.read().strip()
-        except:
-            pass
+            serial = subprocess.check_output(
+                ["sudo", "dmidecode", "-s", "system-serial-number"],
+                text=True
+            ).strip()
+        except Exception as e:
+            print("Could not get serial:", e)
 
-        # Get OS info
+        # OS info
         os_info = f"{platform.system()} {platform.release()}"
         if platform.system() == "Linux":
             try:
@@ -75,9 +81,15 @@ def get_system_info():
             except:
                 pass
 
+        # CPU info
+        cpu_count = psutil.cpu_count()                     # logical cores
+        cpu_freq = psutil.cpu_freq().current if psutil.cpu_freq() else 'N/A'
+
         return {
             'ip': ip,
             'cpu_percent': psutil.cpu_percent(interval=1),
+            'cpu_count': cpu_count,
+            'cpu_freq': cpu_freq,
             'memory_percent': psutil.virtual_memory().percent,
             'memory_total': round(psutil.virtual_memory().total / (1024**3), 2),
             'memory_used': round(psutil.virtual_memory().used / (1024**3), 2),
@@ -86,9 +98,9 @@ def get_system_info():
             'os_info': os_info,
             'uptime': time.time() - psutil.boot_time()
         }
+
     except Exception as e:
         return {'error': str(e)}
-
 
 def get_network_info():
     """Get network interface information"""
@@ -233,7 +245,7 @@ def restart_docker_container():
 def index():
     if 'user' not in session:
         return redirect(url_for('login'))
-    return redirect(url_for('dashboard'))
+    return redirect(url_for('system_page'))
 
 @app.route('/login', methods=['GET', 'POST'])
 def login():
@@ -251,7 +263,7 @@ def login():
             session['role'] = users[username]['role']
             session.permanent = True
             flash('Login successful!', 'success')
-            return redirect(url_for('dashboard'))
+            return redirect(url_for('system_page'))
         else:
             flash('Invalid username or password!', 'error')
 
@@ -289,7 +301,7 @@ def dashboard():
         return redirect(url_for('login'))
     
     system_info = get_system_info()
-    network_info = get_network_info()
+    network_info = get_network_info()   
     
     return render_template('system.html', 
                          system_info=system_info, 
@@ -303,7 +315,8 @@ def system_page():
         return redirect(url_for('login'))
     
     system_info = get_system_info()
-    return render_template('system.html', system_info=system_info)
+    network_info = get_network_info()
+    return render_template('system.html', system_info=system_info, network_info=network_info)
 
 @app.route('/api/system_info')
 def api_system_info():
@@ -320,6 +333,55 @@ def network_page():
     network_info = get_network_info()
     return render_template('network.html', network_info=network_info)
 
+def get_network_info():
+    info = {'interfaces': [], 'routes': [], 'dns': {}, 'default_gateway': None}
+
+    try:
+        # Network interfaces and IPs
+        for iface, addrs in psutil.net_if_addrs().items():
+            if iface == "lo":  # skip loopback
+                continue
+
+            ip = next((a.address for a in addrs if a.family == socket.AF_INET), None)
+            mask = next((a.netmask for a in addrs if a.family == socket.AF_INET), None)
+            mac = next((a.address for a in addrs if a.family == psutil.AF_LINK), None)
+            info['interfaces'].append({
+                'name': iface,
+                'ip': ip,
+                'mask': mask,
+                'mac': mac
+            })
+
+        # Default gateway
+        gw_data = netifaces.gateways().get('default', {}).get(netifaces.AF_INET)
+        if gw_data:
+            info['default_gateway'] = gw_data[0]
+
+        # DNS servers (from /etc/resolv.conf)
+        if os.path.exists('/etc/resolv.conf'):
+            with open('/etc/resolv.conf') as f:
+                dns_lines = [line.strip() for line in f.readlines() if line.startswith('nameserver')]
+                info['dns']['servers'] = [line.split()[1] for line in dns_lines]
+
+        # Routing table
+        try:
+            routes_output = subprocess.check_output(['ip', 'route'], text=True)
+            for line in routes_output.strip().splitlines():
+                parts = line.split()
+                if len(parts) >= 3:
+                    info['routes'].append({
+                        'destination': parts[0],
+                        'via': parts[2] if 'via' in parts else '-'
+                    })
+        except Exception:
+            info['routes'].append({'error': 'Unable to fetch routes'})
+
+    except Exception as e:
+        info['error'] = str(e)
+
+    return info
+
+
 @app.route('/api/network_info')
 def api_network_info():
     if 'user' not in session:
@@ -330,33 +392,32 @@ def api_network_info():
 def api_network_config():
     if 'user' not in session:
         return jsonify({'error': 'Not authenticated'}), 401
-    
+
     config = request.json
-    mode = config.get('mode')  # manual, dhcp, disable
-    ip_address = config.get('ip_address')
-    netmask = config.get('netmask')
-    gateway = config.get('gateway')
-    dns_servers = config.get('dns_servers')
-    dns_config = config.get('dns_config', {})
-    routes = config.get('routes', [])
     try:
-        # Persist the last requested config for auditing
         os.makedirs('logs', exist_ok=True)
         with open(os.path.join('logs', 'network_last_config.json'), 'w') as f:
             json.dump({
-                'mode': mode,
-                'ip_address': ip_address,
-                'netmask': netmask,
-                'gateway': gateway,
-                'dns_servers': dns_servers,
-                'dns_config': dns_config,
-                'routes': routes,
+                'mode': config.get('mode'),
+                'ip_address': config.get('ip_address'),
+                'netmask': config.get('netmask'),
+                'gateway': config.get('gateway'),
+                'dns_servers': config.get('dns_servers'),
+                'dns_config': config.get('dns_config', {}),
+                'routes': config.get('routes', []),
                 'timestamp': datetime.now().isoformat()
             }, f, indent=2)
-        # Real implementation would call system utilities (netplan/ifconfig/ip) here
-        return jsonify({'status': 'success', 'message': 'Network configuration applied', 'dns_status': 'applied'})
+
+        # Safe mode: log only, do not apply actual network change
+        # For real-world use: system('nmcli', 'netplan', or 'ifconfig' here)
+        return jsonify({
+            'status': 'success',
+            'message': 'Network configuration saved (not applied)',
+            'dns_status': 'pending'
+        })
     except Exception as e:
         return jsonify({'status': 'error', 'message': str(e)})
+
 
 @app.route('/dns')
 def dns_page():
@@ -390,6 +451,25 @@ def api_dns_config():
     except Exception as e:
         return jsonify({'status': 'error', 'message': str(e)})
 
+
+@app.route('/api/routes_status')
+def api_routes_status():
+    if 'user' not in session:
+        return jsonify({'error': 'Not authenticated'}), 401
+
+    try:
+        result = subprocess.check_output(['ip', 'route'], text=True)
+        routes = []
+        for line in result.strip().splitlines():
+            parts = line.split()
+            if len(parts) >= 3:
+                routes.append({
+                    'destination': parts[0],
+                    'via': parts[2] if 'via' in parts else '-'
+                })
+        return jsonify({'status': 'success', 'routes': routes})
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': str(e)})
 
 @app.route('/remote_check')
 def remote_check_page():
@@ -922,4 +1002,4 @@ if __name__ == '__main__':
         }
         save_users(default_users)
     
-    app.run(debug=True, host='0.0.0.0', port=8082)
+    app.run(debug=True, host=HOST, port=PORT)
