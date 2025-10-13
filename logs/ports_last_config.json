@@ -1,18 +1,25 @@
 {
   "ports": [
     {
-      "name": "sharon",
-      "port": 4444,
+      "id": "ssh",
+      "name": "SSH",
+      "port": 22,
       "enabled": true
+    },
+    {
+      "id": "http",
+      "name": "HTTP",
+      "port": 80,
+      "enabled": true
+    },
+    {
+      "id": "https",
+      "name": "HTTPS",
+      "port": 443,
+      "enabled": false
     }
   ],
   "default_ports": [],
-  "custom_ports": [
-    {
-      "name": "sharon",
-      "port": 4444,
-      "enabled": true
-    }
-  ],
-  "timestamp": "2025-10-11T12:27:28.680470"
+  "custom_ports": [],
+  "timestamp": "2025-10-13T14:36:21.956028"
 }

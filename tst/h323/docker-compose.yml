@@ -1,0 +1,10 @@
+version: '3'
+services:
+  sip_service:
+    image: myh323:latest
+    environment:
+      - SIP_PORT=5060
+      - H323_PORT=17889
+      - H323_ENABLED=false
+      - SIP_ENABLED=false
+
